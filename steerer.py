@@ -1,5 +1,7 @@
 import paho.mqtt.client as mqtt
 import time
+import subprocess
+import json
 
 # Callback functions
 def on_connect(client, userdata, flags, rc):
@@ -32,7 +34,7 @@ def on_disconnect(client, userdata, rc):
 # MQTT broker settings
 broker_address = "lancionaco.ddns.net"
 port = 1883
-topic = "test/message"
+topic = "sensor/moisture"  # Changed topic to be more descriptive
 
 # Create a MQTT client instance
 client = mqtt.Client(
@@ -45,7 +47,6 @@ client.on_connect = on_connect
 client.on_disconnect = on_disconnect
 
 # Enable automatic reconnection
-
 client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 # Connect to the broker
@@ -55,14 +56,35 @@ client.connect(broker_address, port, keepalive=120)
 # Start the loop in a non-blocking way
 client.loop_start()
 
+# RTL_433 command
+rtl_command = ["sudo", "rtl_433", "-f", "868M", "-R", "142", "-F", "json"]
+
 # Main loop
 try:
+    # Start the rtl_433 process
+    process = subprocess.Popen(rtl_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    
+    # Read output line by line
     while True:
-        message = "Hello from Python MQTT client!"
-        client.publish(topic, message)
-        print(f"Message sent to topic '{topic}': {message}")
-        time.sleep(0.5)  # Send a message every 5 seconds
+        line = process.stdout.readline()
+        if line:
+            try:
+                # Parse JSON data
+                data = json.loads(line)
+                # Publish the JSON data to MQTT
+                client.publish(topic, json.dumps(data))
+                print(f"Sent sensor data: {data}")
+            except json.JSONDecodeError as e:
+                # Skip lines that aren't valid JSON
+                continue
 
 except KeyboardInterrupt:
     print("\nScript terminated by user")
+    process.terminate()  # Terminate the rtl_433 process
     client.loop_stop()
+    client.disconnect()
+except Exception as e:
+    print(f"An error occurred: {e}")
+    process.terminate()
+    client.loop_stop()
+    client.disconnect()
