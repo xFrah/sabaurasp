@@ -57,7 +57,7 @@ client.connect(broker_address, port, keepalive=120)
 client.loop_start()
 
 # RTL_433 command
-rtl_command = ["sudo", "rtl_433", "-f", "868M", "-R", "142", "-F", "json"]
+rtl_command = ["sudo", "rtl_433", "-f", "868M", "-R", "142", "-F", "json", "-Y", "autolevel", "-Y", "magest", "-M", "level", "-M", "noise"]
 
 # Main loop
 try:
