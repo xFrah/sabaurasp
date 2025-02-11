@@ -5,17 +5,17 @@ import json
 
 # Callback functions
 def on_connect(client, userdata, flags, rc):
-    print(f"Connected with result code {rc}")
+    print(f"[MQTT] Connected with result code {rc}")
     if rc == 0:
-        print("Successfully connected to broker")
+        print("[MQTT] Successfully connected to broker")
     else:
-        print("Connection failed, retrying...")
+        print("[MQTT] Connection failed, retrying...")
 
 def on_disconnect(client, userdata, rc):
     if rc == 0:
-        print("Clean disconnection from broker")
+        print("[MQTT] Clean disconnection from broker")
     else:
-        print(f"Unexpected disconnection from broker. Return code: {rc}")
+        print(f"[MQTT] Unexpected disconnection from broker. Return code: {rc}")
         # rc meanings:
         # 0: Clean disconnect
         # 1: Protocol version error
@@ -28,7 +28,7 @@ def on_disconnect(client, userdata, rc):
             client.reconnect()
             break
         except Exception as e:
-            print(f"Reconnection failed: {e}")
+            print(f"[MQTT] Reconnection failed: {e}")
             time.sleep(5)
 
 # MQTT broker settings
@@ -50,7 +50,7 @@ client.on_disconnect = on_disconnect
 client.reconnect_delay_set(min_delay=1, max_delay=30)
 
 # Connect to the broker
-print(f"Connecting to broker {broker_address}...")
+print(f"[MQTT] Connecting to broker {broker_address}...")
 client.connect(broker_address, port, keepalive=120)
 
 # Start the loop in a non-blocking way
@@ -73,9 +73,9 @@ try:
                 data = json.loads(line)
                 # Publish the JSON data to MQTT
                 client.publish(topic, json.dumps(data))
-                print(f"Sent sensor data: {data}")
+                print(f"[MQTT] Sent: {data}")
             except json.JSONDecodeError as e:
-                # Skip lines that aren't valid JSON
+                print(f"[RTL_433] {line}")
                 continue
 
 except KeyboardInterrupt:
