@@ -4,35 +4,75 @@ import numpy as np
 import base64
 import threading
 import time
+import json
 from collections import deque
 from datetime import datetime
 
 counter = 0
 last_time = time.time()
+last_move_time = 0
+last_position = {"x": 0, "y": 0}
+
+def map_to_range(value):
+    # Map from 0-200 to -1 to 1
+    return (value - 100) / 100.0
+
+def check_and_send_position():
+    global last_move_time, last_position
+    
+    while StreamReceiver.instance.running:
+        current_time = time.time()
+        
+        # Get current positions and map to -1 to 1
+        x_pos = map_to_range(cv2.getTrackbarPos('X Position', 'Camera Control'))
+        y_pos = map_to_range(cv2.getTrackbarPos('Y Position', 'Camera Control'))
+        
+        current_position = {"x": x_pos, "y": y_pos}
+        
+        # Only send if position changed and rate limit of 1 second
+        if (current_position != last_position and 
+            current_time - last_move_time >= 1.0):
+            
+            # Send to MQTT
+            StreamReceiver.instance.client.publish(
+                "camera/move", 
+                json.dumps(current_position)
+            )
+            print(f"Sending position: x={x_pos:.2f}, y={y_pos:.2f}")
+            
+            last_position = current_position
+            last_move_time = current_time
+            
+        time.sleep(0.1)  # Small sleep to prevent CPU overuse
 
 class StreamReceiver:
-    def __init__(self, broker_address="lancionaco.ddns.net", port=1883, buffer_size=30):
+    instance = None
+    
+    def __init__(self, broker_address="lancionaco.ddns.net", port=1883):
+        StreamReceiver.instance = self
         self.client = mqtt.Client(client_id="stream_receiver_client", protocol=mqtt.MQTTv311)
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
         self.client.on_disconnect = self.on_disconnect
 
-        # Frame buffer and threading components
-        self.frame_buffer = deque(maxlen=buffer_size)
-        self.frame_times = deque(maxlen=buffer_size)
-        self.buffer_lock = threading.Lock()
         self.running = True
-        
-        # Statistics
-        self.stats_lock = threading.Lock()
-        self.received_frames = 0
-        self.last_stats_print = time.time()
-        self.stats_interval = 5.0  # Print stats every 5 seconds
-        self.processing_times = deque(maxlen=100)  # Track message processing times
-        self.fps_window = deque(maxlen=100)  # Track frame arrival times for FPS calculation
 
         print(f"[MQTT] Connecting to broker {broker_address}...")
         self.client.connect(broker_address, port, keepalive=120)
+
+        # Create control window and trackbars
+        cv2.namedWindow('Camera Control')
+        cv2.createTrackbar('X Position', 'Camera Control', 100, 200, lambda x: None)
+        cv2.createTrackbar('Y Position', 'Camera Control', 100, 200, lambda x: None)
+        
+        # Set initial positions to center (100 = 0.0)
+        cv2.setTrackbarPos('X Position', 'Camera Control', 100)
+        cv2.setTrackbarPos('Y Position', 'Camera Control', 100)
+
+        # Start position checking thread
+        self.position_thread = threading.Thread(target=check_and_send_position)
+        self.position_thread.daemon = True
+        self.position_thread.start()
 
     def on_connect(self, client, userdata, flags, rc):
         print(f"[MQTT] Connected with result code {rc}")
@@ -48,47 +88,35 @@ class StreamReceiver:
     def on_message(self, client, userdata, msg):
         global counter, last_time
         try:            
-            # # Decode base64 string to image
-            # img_data = base64.b64decode(msg.payload)
-            # np_arr = np.frombuffer(img_data, np.uint8)
-            # frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            frame = cv2.imdecode(np.frombuffer(msg.payload, np.uint8), cv2.IMREAD_COLOR)
+            cv2.imshow('Camera Control', frame)
             
-            # # Add frame to buffer with timestamp
-            # with self.buffer_lock:
-            #     self.frame_buffer.append(frame)
-            #     self.frame_times.append(datetime.now())
-            #     buffer_size = len(self.frame_buffer)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                self.running = False
+                self.client.disconnect()
+                cv2.destroyAllWindows()
 
             counter += 1
-            if counter % 30 == 0:
+            if counter % 60 == 0:
                 current_time = time.time()
-                fps = 30 / (current_time - last_time)
+                fps = 60 / (current_time - last_time)
                 print(f"Actual FPS: {fps:.2f}")
                 last_time = current_time
-            
-            # # Print warning if buffer is full
-            # if buffer_size >= self.frame_buffer.maxlen:
-            #     print(f"Warning: Buffer filling up ({buffer_size}/{self.frame_buffer.maxlen})")
-                
+
         except Exception as e:
             print(f"Error processing frame: {e}")
 
-    def get_latest_frame(self):
-        """Get the most recent frame from the buffer"""
-        with self.buffer_lock:
-            if len(self.frame_buffer) > 0:
-                return self.frame_buffer[-1].copy()
-        return None
-
     def start(self):
         try:
-            # Start MQTT client loop in the main thread
-            # Start MQTT client loop in the main thread
             self.client.loop_forever()
         except KeyboardInterrupt:
             print("Stopping receiver...")
             self.running = False
             self.client.disconnect()
+            cv2.destroyAllWindows()
+            if self.position_thread.is_alive():
+                self.position_thread.join()
 
 if __name__ == "__main__":
     receiver = StreamReceiver()
