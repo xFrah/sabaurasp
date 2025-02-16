@@ -1,265 +1,150 @@
 from onvif import ONVIFCamera
 import cv2
-import paho.mqtt.client as mqtt
 import threading
-import base64
+import vlc
 import time
-import numpy as np
-import json
+
+cameras = {
+    "bulb": {
+        "ip": "lancionaco.ddns.net",
+        "onvif_port": 7071,
+        "rtsp_port": 7072,
+        "username": "admin",
+        "password": "password",
+    },
+    "tapo": {
+        "ip": "lancionaco.ddns.net",
+        "onvif_port": 7073,
+        "rtsp_port": 7074,
+        "username": "fdimonaco309@hotmail.com",
+        "password": "Gaspardo1*tapo",
+    },
+}
+
+selected_camera = cameras["tapo"]
 
 
-# class Movement:
-#     @staticmethod
-#     def left():
-#         return {"x": -0.5, "y": 0}
-    
-#     @staticmethod
-#     def right():
-#         return {"x": 0.5, "y": 0}
-    
-#     @staticmethod
-#     def up():
-#         return {"x": 0, "y": 0.5}
-    
-#     @staticmethod
-#     def down():
-#         return {"x": 0, "y": -0.5}
-
-
-class CameraStream:
-    def __init__(
-        self, camera_ip="192.168.0.174", camera_port=8000, username="admin", password="password", mqtt_broker="lancionaco.ddns.net", mqtt_port=1883
-    ):
-        # Camera settings
-        self.stream_uri = None
-        self.cap = None
-        self.running = False
-        self.frame_count = 0
-        self.publish_count = 0
-        self.last_frame_time = time.time()
-        self.last_read_time = time.time()
-        self.last_publish_time = time.time()
-        self.last_fps_time = time.time()
-        self.current_frame = None
-        self.frame_lock = threading.Lock()
-
+class CameraControl:
+    def __init__(self, camera_ip=selected_camera["ip"], camera_port=selected_camera["onvif_port"], username=selected_camera["username"], password=selected_camera["password"]):
         # PTZ control
         self.ptz = None
-        self.ptz_config = None
         self.media = None
         self.profile = None
-        self.request = None
-        self.camera_positioned = False
-        self.pan_space = None
-        self.tilt_space = None
-        self.zoom_space = None
-
-        # MQTT settings
-        self.mqtt_client = mqtt.Client(client_id="camera_stream_client", protocol=mqtt.MQTTv311)
-        self.mqtt_client.on_connect = self.on_connect
-        self.mqtt_client.on_disconnect = self.on_disconnect
+        self.running = True
+        self.last_position = {"x": 0, "y": 0}
+        self.last_move_time = 0
+        self.counter = 0
 
         # Initialize camera
         self.setup_camera(camera_ip, camera_port, username, password)
 
-        # Connect to MQTT broker
-        print(f"[MQTT] Connecting to broker {mqtt_broker}...")
-        self.mqtt_client.connect(mqtt_broker, mqtt_port, keepalive=120)
+        # Create control window and trackbars
+        cv2.namedWindow("Camera Control")
+        cv2.createTrackbar("X Position", "Camera Control", 100, 200, lambda x: None)
+        cv2.createTrackbar("Y Position", "Camera Control", 100, 200, lambda x: None)
 
-        # Start MQTT loop in a separate thread
-        self.mqtt_thread = threading.Thread(target=self.mqtt_client.loop_forever)
-        self.mqtt_thread.daemon = True
-        self.mqtt_thread.start()
+        # Set initial positions to center (100 = 0.0)
+        cv2.setTrackbarPos("X Position", "Camera Control", 100)
+        cv2.setTrackbarPos("Y Position", "Camera Control", 100)
 
-    def on_connect(self, client, userdata, flags, rc):
-        print(f"[MQTT] Connected with result code {rc}")
-        if rc == 0:
-            print("[MQTT] Successfully connected to broker")
-            # Subscribe to movement control topic
-            self.mqtt_client.subscribe("camera/move")
-            self.mqtt_client.on_message = self.on_move_message
-        else:
-            print("[MQTT] Connection failed")
+        # Start position checking thread
+        self.position_thread = threading.Thread(target=self.check_and_move_position)
+        self.position_thread.daemon = True
+        self.position_thread.start()
 
-    def on_disconnect(self, client, userdata, rc):
-        print(f"[MQTT] Disconnected with result code {rc}")
+    def map_to_range(self, value):
+        # Map from 0-200 to -1 to 1
+        return (value - 100) / 100.0
 
-    def on_move_message(self, client, userdata, msg):
+    def check_and_move_position(self):
+        while self.running:
+            current_time = time.time()
+
+            # Get current positions and map to -1 to 1
+            x_pos = self.map_to_range(cv2.getTrackbarPos("X Position", "Camera Control"))
+            y_pos = self.map_to_range(cv2.getTrackbarPos("Y Position", "Camera Control"))
+
+            current_position = {"x": x_pos, "y": y_pos}
+
+            if current_position != self.last_position:
+                print(f"Position changed: {current_position}")
+                self.counter = 0
+
+            # Only move if position changed and rate limit of 2 seconds
+            if (current_position != self.last_position or self.counter < 5) and current_time - self.last_move_time >= 2.0:
+
+                print(f"Moving to position: x={x_pos:.2f}, y={y_pos:.2f}")
+                self.move_camera(current_position)
+
+                self.last_position = current_position
+                self.last_move_time = current_time
+                self.counter += 1
+
+            time.sleep(0.1)  # Small sleep to prevent CPU overuse
+
+    def move_camera(self, position):
+        """Move camera to specified position"""
         try:
-            # Get current position before moving
-            status = self.ptz.GetStatus(self.profile.token)
-            current_pos = status.Position
-            print(f"Current position - Pan: {current_pos.PanTilt.x:.2f}, Tilt: {current_pos.PanTilt.y:.2f}")
-
-            # self.stop_movement()
-        except Exception as e:
-            print(f"Error getting status/stopping movement: {e}")
-
-        try:
-            # Parse the message payload as a string containing a dict
-            position = json.loads(msg.payload.decode())
-            
             # Create and send the move request
             request = self.ptz.create_type("AbsoluteMove")
             request.ProfileToken = self.profile.token
-            request.Position = {
-                "PanTilt": {"x": position["x"], "y": position["y"]},
-                "Zoom": {"x": 0.5}  # Keep zoom constant
-            }
-            
-            res = self.ptz.AbsoluteMove(request)
-            print(f"Moving camera to x:{position['x']}, y:{position['y']}")
-        except Exception as e:
-            print(f"Error processing move command: {e}")
+            request.Position = {"PanTilt": {"x": position["x"], "y": position["y"]}, "Zoom": {"x": 0.5}}  # Keep zoom constant
 
-    def get_position(self):
-        """Get current PTZ position"""
-        try:
-            status = self.ptz.GetStatus({'ProfileToken': self.profile.token})
-            return {
-                "x": status.Position.PanTilt.x,
-                "y": status.Position.PanTilt.y,
-                "zoom": status.Position.Zoom.x
-            }
+            # Send move request with callback
+            self.ptz.AbsoluteMove(request)
         except Exception as e:
-            print(f"Error getting camera position: {e}")
-            return None
+            print(f"Error moving camera: {e}")
+
 
     def setup_camera(self, camera_ip, camera_port, username, password):
         # Initialize ONVIF camera
         mycam = ONVIFCamera(camera_ip, camera_port, username, password)
 
+        print(f"Connecting to camera at {camera_ip}:{camera_port}")
+
         # Get media service
         self.media = mycam.create_media_service()
         profiles = self.media.GetProfiles()
         self.profile = profiles[0]
-        token = self.profile.token
+
+        print(f"Connected to camera at {camera_ip}:{camera_port}")
+
+        # Get RTSP URL
+        stream_setup = {"Stream": "RTP-Unicast", "Transport": "RTSP"}
+        self.stream_uri = self.media.GetStreamUri({"ProfileToken": self.profile.token, "StreamSetup": stream_setup}).Uri
+        if not self.stream_uri.startswith("rtsp://"):
+            raise ValueError("Invalid RTSP URI")
+
+        self.stream_uri = "/" + self.stream_uri[7:].split("/", 1)[1]
+        print(f"RTSP Stream URI: {self.stream_uri}")
 
         # Setup PTZ control
         self.ptz = mycam.create_ptz_service()
 
-        # Get PTZ configuration
-        self.ptz_config = self.ptz.GetConfiguration({"PTZConfigurationToken": self.profile.PTZConfiguration.token})
-
-        # Get movement spaces from configuration
-        self.pan_tilt_space = self.ptz_config.PanTiltLimits.Range
-
-        print(f"Pan range: {self.pan_tilt_space.XRange.Min} to {self.pan_tilt_space.XRange.Max}")
-
-        # Get stream URI
-        request = self.media.create_type("GetStreamUri")
-        request.ProfileToken = token
-        request.StreamSetup = {"Stream": "RTP-Unicast", "Transport": {"Protocol": "RTSP"}}
-
-        uri = self.media.GetStreamUri(request)
-        stream_uri = uri.Uri
-
-        # Modify URI to include credentials
-        stream_parts = stream_uri.split("://")
-        self.stream_uri = f"rtsp://{username}:{password}@{stream_parts[1]}"
-        print("RTSP Stream URI:", self.stream_uri)
-
-    def start_streaming(self):
-        self.cap = cv2.VideoCapture(self.stream_uri)
-
-        # set no buffer
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        # Get and print stream properties
-        width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.stream_fps = int(self.cap.get(cv2.CAP_PROP_FPS))
-        print(f"Stream Resolution: {width}x{height}")
-        print(f"Stream FPS: {self.stream_fps}")
-
-        self.running = True
-
-        # Start capture and publish threads
-        self.capture_thread = threading.Thread(target=self.capture_frames)
-        self.publish_thread = threading.Thread(target=self.publish_frames)
-        self.capture_thread.daemon = True
-        self.publish_thread.daemon = True
-        self.capture_thread.start()
-        self.publish_thread.start()
-
-    def capture_frames(self):
-        while self.running:
-            ret, frame = self.cap.read()
-            if ret:
-                with self.frame_lock:
-                    self.current_frame = frame
-                self.last_read_time = time.time()
-
-                # cv2.imshow("ONVIF Camera Stream", frame)
-
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    self.stop_streaming()
+    def start(self):
+        self.player = vlc.MediaPlayer(f"rtsp://{selected_camera['username']}:{selected_camera['password']}@{selected_camera['ip']}:{selected_camera['rtsp_port']}{self.stream_uri}")
+        self.player.play()
+        try:
+            # Main loop to keep window open
+            while self.running:
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
                     break
+                time.sleep(0.1)
 
-                # Calculate actual FPS
-                self.frame_count += 1
-                if self.frame_count % 30 == 0:
-                    fps = 30 / (time.time() - self.last_frame_time)
-                    print(f"Actual FPS: {fps:.2f}")
-                    self.last_frame_time = time.time()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            print("Stopping camera control...")
+            self.cleanup()
 
-    def publish_frames(self):
-        while self.running:
-            try:
-                with self.frame_lock:
-                    frame = self.current_frame
-
-                if frame is not None and self.last_publish_time < self.last_read_time:
-                    # Resize frame to reduce bandwidth (adjust dimensions as needed)
-                    frame = cv2.resize(frame, (640, 480))
-
-                    # Encode frame to JPEG
-                    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                    # Convert to base64
-                    jpg_as_text = buffer.tobytes()
-
-                    # Send over MQTT
-                    self.mqtt_client.publish("camera/stream", jpg_as_text).wait_for_publish()
-
-                    self.publish_count += 1
-                    if self.publish_count % 30 == 0:
-                        current_time = time.time()
-                        fps = 30 / (current_time - self.last_fps_time)
-                        print(f"Publish FPS: {fps:.2f}")
-                        self.last_fps_time = time.time()
-                    self.last_publish_time = time.time()
-
-                # Sleep briefly to prevent CPU overuse
-                time.sleep(0.001)
-            except Exception as e:
-                print(f"Error publishing frames: {e}")
-
-    def stop_movement(self):
-        request = self.ptz.create_type("Stop")
-        request.ProfileToken = self.profile.token
-        self.ptz.Stop(request)
-
-    def stop_streaming(self):
+    def cleanup(self):
         self.running = False
-        self.stop_movement()  # Stop any ongoing movement
-        if self.capture_thread is not None:
-            self.capture_thread.join()
-        if self.publish_thread is not None:
-            self.publish_thread.join()
-        if self.cap is not None:
-            self.cap.release()
         cv2.destroyAllWindows()
-        self.mqtt_client.disconnect()
+        if self.position_thread.is_alive():
+            self.position_thread.join()
 
 
 if __name__ == "__main__":
-    # Create and start camera stream
-    camera_stream = CameraStream()
-    try:
-        camera_stream.start_streaming()
-        # Keep main thread alive
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Stopping stream...")
-        camera_stream.stop_streaming()
+    camera_control = CameraControl()
+    camera_control.start()
