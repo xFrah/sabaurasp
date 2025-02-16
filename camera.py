@@ -86,9 +86,14 @@ class CameraStream:
 
     def on_move_message(self, client, userdata, msg):
         try:
-            self.stop_movement()
+            # Get current position before moving
+            status = self.ptz.GetStatus(self.profile.token)
+            current_pos = status.Position
+            print(f"Current position - Pan: {current_pos.PanTilt.x:.2f}, Tilt: {current_pos.PanTilt.y:.2f}")
+
+            # self.stop_movement()
         except Exception as e:
-            print(f"Error stopping movement: {e}")
+            print(f"Error getting status/stopping movement: {e}")
 
         try:
             # Parse the message payload as a string containing a dict
@@ -102,10 +107,23 @@ class CameraStream:
                 "Zoom": {"x": 0.5}  # Keep zoom constant
             }
             
-            self.ptz.AbsoluteMove(request)
+            res = self.ptz.AbsoluteMove(request)
             print(f"Moving camera to x:{position['x']}, y:{position['y']}")
         except Exception as e:
             print(f"Error processing move command: {e}")
+
+    def get_position(self):
+        """Get current PTZ position"""
+        try:
+            status = self.ptz.GetStatus({'ProfileToken': self.profile.token})
+            return {
+                "x": status.Position.PanTilt.x,
+                "y": status.Position.PanTilt.y,
+                "zoom": status.Position.Zoom.x
+            }
+        except Exception as e:
+            print(f"Error getting camera position: {e}")
+            return None
 
     def setup_camera(self, camera_ip, camera_port, username, password):
         # Initialize ONVIF camera
@@ -187,31 +205,34 @@ class CameraStream:
 
     def publish_frames(self):
         while self.running:
-            with self.frame_lock:
-                frame = self.current_frame
+            try:
+                with self.frame_lock:
+                    frame = self.current_frame
 
-            if frame is not None and self.last_publish_time < self.last_read_time:
-                # Resize frame to reduce bandwidth (adjust dimensions as needed)
-                frame = cv2.resize(frame, (640, 480))
+                if frame is not None and self.last_publish_time < self.last_read_time:
+                    # Resize frame to reduce bandwidth (adjust dimensions as needed)
+                    frame = cv2.resize(frame, (640, 480))
 
-                # Encode frame to JPEG
-                _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                # Convert to base64
-                jpg_as_text = buffer.tobytes()
+                    # Encode frame to JPEG
+                    _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    # Convert to base64
+                    jpg_as_text = buffer.tobytes()
 
-                # Send over MQTT
-                self.mqtt_client.publish("camera/stream", jpg_as_text).wait_for_publish()
+                    # Send over MQTT
+                    self.mqtt_client.publish("camera/stream", jpg_as_text).wait_for_publish()
 
-                self.publish_count += 1
-                if self.publish_count % 30 == 0:
-                    current_time = time.time()
-                    fps = 30 / (current_time - self.last_fps_time)
-                    print(f"Publish FPS: {fps:.2f}")
-                    self.last_fps_time = time.time()
-                self.last_publish_time = time.time()
+                    self.publish_count += 1
+                    if self.publish_count % 30 == 0:
+                        current_time = time.time()
+                        fps = 30 / (current_time - self.last_fps_time)
+                        print(f"Publish FPS: {fps:.2f}")
+                        self.last_fps_time = time.time()
+                    self.last_publish_time = time.time()
 
-            # Sleep briefly to prevent CPU overuse
-            time.sleep(0.001)
+                # Sleep briefly to prevent CPU overuse
+                time.sleep(0.001)
+            except Exception as e:
+                print(f"Error publishing frames: {e}")
 
     def stop_movement(self):
         request = self.ptz.create_type("Stop")

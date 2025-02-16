@@ -12,42 +12,49 @@ counter = 0
 last_time = time.time()
 last_move_time = 0
 last_position = {"x": 0, "y": 0}
+send_counter = 0
+
 
 def map_to_range(value):
     # Map from 0-200 to -1 to 1
     return (value - 100) / 100.0
 
+
 def check_and_send_position():
-    global last_move_time, last_position
-    
+    global last_move_time, last_position, send_counter
+
     while StreamReceiver.instance.running:
         current_time = time.time()
-        
+
         # Get current positions and map to -1 to 1
-        x_pos = map_to_range(cv2.getTrackbarPos('X Position', 'Camera Control'))
-        y_pos = map_to_range(cv2.getTrackbarPos('Y Position', 'Camera Control'))
-        
+        x_pos = map_to_range(cv2.getTrackbarPos("X Position", "Camera Control"))
+        y_pos = map_to_range(cv2.getTrackbarPos("Y Position", "Camera Control"))
+
         current_position = {"x": x_pos, "y": y_pos}
-        
+
         # Only send if position changed and rate limit of 1 second
-        if (current_position != last_position and 
-            current_time - last_move_time >= 1.0):
-            
+        if (current_position != last_position or send_counter < 10) and current_time - last_move_time >= 2.0:
+
+            if current_position == last_position:
+                send_counter += 1
+                print(f"Old position: x={last_position['x']:.2f}, y={last_position['y']:.2f}")
+            else:
+                send_counter = 0
+                print(f"New position: x={x_pos:.2f}, y={y_pos:.2f}")
+
             # Send to MQTT
-            StreamReceiver.instance.client.publish(
-                "camera/move", 
-                json.dumps(current_position)
-            )
-            print(f"Sending position: x={x_pos:.2f}, y={y_pos:.2f}")
-            
+            StreamReceiver.instance.client.publish("camera/move", json.dumps(current_position))
+            # print(f"Sending position: x={x_pos:.2f}, y={y_pos:.2f}")
+
             last_position = current_position
             last_move_time = current_time
-            
+
         time.sleep(0.1)  # Small sleep to prevent CPU overuse
+
 
 class StreamReceiver:
     instance = None
-    
+
     def __init__(self, broker_address="lancionaco.ddns.net", port=1883):
         StreamReceiver.instance = self
         self.client = mqtt.Client(client_id="stream_receiver_client", protocol=mqtt.MQTTv311)
@@ -61,13 +68,13 @@ class StreamReceiver:
         self.client.connect(broker_address, port, keepalive=120)
 
         # Create control window and trackbars
-        cv2.namedWindow('Camera Control')
-        cv2.createTrackbar('X Position', 'Camera Control', 100, 200, lambda x: None)
-        cv2.createTrackbar('Y Position', 'Camera Control', 100, 200, lambda x: None)
-        
+        cv2.namedWindow("Camera Control")
+        cv2.createTrackbar("X Position", "Camera Control", 100, 200, lambda x: None)
+        cv2.createTrackbar("Y Position", "Camera Control", 100, 200, lambda x: None)
+
         # Set initial positions to center (100 = 0.0)
-        cv2.setTrackbarPos('X Position', 'Camera Control', 100)
-        cv2.setTrackbarPos('Y Position', 'Camera Control', 100)
+        cv2.setTrackbarPos("X Position", "Camera Control", 100)
+        cv2.setTrackbarPos("Y Position", "Camera Control", 100)
 
         # Start position checking thread
         self.position_thread = threading.Thread(target=check_and_send_position)
@@ -87,12 +94,12 @@ class StreamReceiver:
 
     def on_message(self, client, userdata, msg):
         global counter, last_time
-        try:            
+        try:
             frame = cv2.imdecode(np.frombuffer(msg.payload, np.uint8), cv2.IMREAD_COLOR)
-            cv2.imshow('Camera Control', frame)
-            
+            cv2.imshow("Camera Control", frame)
+
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
+            if key == ord("q"):
                 self.running = False
                 self.client.disconnect()
                 cv2.destroyAllWindows()
@@ -117,6 +124,7 @@ class StreamReceiver:
             cv2.destroyAllWindows()
             if self.position_thread.is_alive():
                 self.position_thread.join()
+
 
 if __name__ == "__main__":
     receiver = StreamReceiver()
