@@ -21,7 +21,7 @@ cameras = {
     },
 }
 
-selected_camera = cameras["tapo"]
+selected_camera = cameras["bulb"]
 
 
 class CameraControl:
@@ -54,7 +54,7 @@ class CameraControl:
 
     def map_to_range(self, value):
         # Map from 0-200 to -1 to 1
-        return (value - 100) / 100.0
+        return (value - 100) / 100
 
     def check_and_move_position(self):
         while self.running:
