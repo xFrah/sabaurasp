@@ -32,7 +32,7 @@ def on_disconnect(client, userdata, rc):
             time.sleep(5)
 
 # MQTT broker settings
-broker_address = "lancionaco.ddns.net"
+broker_address = "lancionaco.love"
 port = 1883
 topic = "sensor/moisture"  # Changed topic to be more descriptive
 
